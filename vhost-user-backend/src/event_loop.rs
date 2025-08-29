@@ -159,9 +159,9 @@ where
     ///
     /// When this event is later triggered, the backend implementation of `handle_event` will be
     /// called.
-    pub fn register_listener(&self, fd: RawFd, ev_type: EventSet, data: u64) -> Result<()> {
+    pub fn register_listener(&self, fd: RawFd, ev_type: EventSet, data: usize) -> Result<()> {
         // `data` range [0...num_queues] is reserved for queues and exit event.
-        if data <= self.num_backend_queues as u64 {
+        if data <= self.num_backend_queues {
             Err(io::Error::from_raw_os_error(libc::EINVAL))
         } else {
             self.register_event(fd, ev_type, data)
@@ -172,37 +172,43 @@ where
     ///
     /// If the event is triggered after this function has been called, the event will be silently
     /// dropped.
-    pub fn unregister_listener(&self, fd: RawFd, ev_type: EventSet, data: u64) -> Result<()> {
+    pub fn unregister_listener(&self, fd: RawFd, ev_type: EventSet, data: usize) -> Result<()> {
         // `data` range [0...num_queues] is reserved for queues and exit event.
-        if data <= self.num_backend_queues as u64 {
+        if data <= self.num_backend_queues {
             Err(io::Error::from_raw_os_error(libc::EINVAL))
         } else {
             self.unregister_event(fd, ev_type, data)
         }
     }
 
-    pub(crate) fn register_event(&self, fd: RawFd, ev_type: EventSet, data: u64) -> Result<()> {
-        self.epoll
-            .ctl(ControlOperation::Add, fd, EpollEvent::new(ev_type, data))?;
-        if data < self.num_backend_queues as u64 {
+    pub(crate) fn register_event(&self, fd: RawFd, ev_type: EventSet, data: usize) -> Result<()> {
+        self.epoll.ctl(
+            ControlOperation::Add,
+            fd,
+            EpollEvent::new(ev_type, data as u64),
+        )?;
+        if data < self.num_backend_queues {
             self.vrings_with_pending_events
                 .lock()
                 .unwrap()
-                .insert(data as usize);
+                .insert(data);
             self.vring_enabled_event_fd.1.notify()?;
         }
         Ok(())
     }
 
-    pub(crate) fn unregister_event(&self, fd: RawFd, ev_type: EventSet, data: u64) -> Result<()> {
-        if data < self.num_backend_queues as u64 {
+    pub(crate) fn unregister_event(&self, fd: RawFd, ev_type: EventSet, data: usize) -> Result<()> {
+        if data < self.num_backend_queues {
             self.vrings_with_pending_events
                 .lock()
                 .unwrap()
-                .remove(&(data as usize));
+                .remove(&data);
         }
-        self.epoll
-            .ctl(ControlOperation::Delete, fd, EpollEvent::new(ev_type, data))
+        self.epoll.ctl(
+            ControlOperation::Delete,
+            fd,
+            EpollEvent::new(ev_type, data as u64),
+        )
     }
 
     /// Run the event poll loop to handle all pending events on registered fds.

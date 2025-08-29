@@ -224,7 +224,7 @@ where
                         if let Err(e) = self.handlers[thread_index].register_event(
                             fd.as_raw_fd(),
                             EventSet::IN,
-                            u64::from(evt_idx),
+                            evt_idx as usize,
                         ) {
                             if e.kind() != io::ErrorKind::AlreadyExists {
                                 // This could happen if we're asked by the frontend to enable an
@@ -236,7 +236,7 @@ where
                         let _ = self.handlers[thread_index].unregister_event(
                             fd.as_raw_fd(),
                             EventSet::IN,
-                            u64::from(evt_idx),
+                            evt_idx as usize,
                         );
                     }
                     break;
