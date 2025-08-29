@@ -89,7 +89,7 @@ pub struct VringEpollHandler<T: VhostUserBackend> {
     thread_id: usize,
     exit_event_fd: Option<EventNotifier>,
     vring_enabled_event_fd: (EventConsumer, EventNotifier),
-    vrings_with_pending_events: Mutex<HashSet<u16>>,
+    vrings_with_pending_events: Mutex<HashSet<usize>>,
     phantom: PhantomData<T::Bitmap>,
 }
 
@@ -188,7 +188,7 @@ where
             self.vrings_with_pending_events
                 .lock()
                 .unwrap()
-                .insert(data as u16);
+                .insert(data as usize);
             self.vring_enabled_event_fd.1.notify()?;
         }
         Ok(())
@@ -199,7 +199,7 @@ where
             self.vrings_with_pending_events
                 .lock()
                 .unwrap()
-                .remove(&(data as u16));
+                .remove(&(data as usize));
         }
         self.epoll
             .ctl(ControlOperation::Delete, fd, EpollEvent::new(ev_type, data))
@@ -241,10 +241,10 @@ where
                     }
                 };
 
-                let ev_type = event.data() as u16;
+                let ev_type = event.data();
 
                 // handle_event() returns true if an event is received from the exit event fd.
-                if self.handle_event(ev_type, evset)? {
+                if self.handle_event(ev_type as usize, evset)? {
                     break 'epoll;
                 }
             }
@@ -253,13 +253,13 @@ where
         Ok(())
     }
 
-    fn handle_event(&self, device_event: u16, evset: EventSet) -> VringEpollResult<bool> {
-        if device_event as usize == self.num_backend_queues {
+    fn handle_event(&self, device_event: usize, evset: EventSet) -> VringEpollResult<bool> {
+        if device_event == self.num_backend_queues {
             return self.handle_num_queues_event(evset);
         }
 
-        if (device_event as usize) < self.vrings.len() {
-            let vring = &self.vrings[device_event as usize];
+        if device_event < self.vrings.len() {
+            let vring = &self.vrings[device_event];
             let enabled = vring
                 .read_kick()
                 .map_err(VringEpollError::HandleEventReadKick)?;
@@ -286,9 +286,8 @@ where
                 let vrings_with_pending_events =
                     std::mem::take(&mut *self.vrings_with_pending_events.lock().unwrap());
                 for device_event in vrings_with_pending_events {
-                    let vring_idx = device_event as usize;
-                    if vring_idx >= self.vrings.len() {
-                        return Err(VringEpollError::VringIndexOutOfRange(vring_idx));
+                    if device_event >= self.vrings.len() {
+                        return Err(VringEpollError::VringIndexOutOfRange(device_event));
                     }
                     self.backend
                         .handle_event(device_event, evset, &self.vrings, self.thread_id)
