@@ -28,7 +28,7 @@ xen = ["vm-memory/xen"]
 postcopy = []
 
 [dependencies]
-bitflags = "2.4"
+bitflags = "2.13"
 libc = "0.2.39"
 uuid = { version = "1.11.0", default-features = false, features=["v4", "fast-rng"] }
 
