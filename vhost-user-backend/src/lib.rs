@@ -424,9 +424,16 @@ mod tests {
 
         thread::scope(|s| {
             s.spawn(|| {
-                while !socket_path.exists() {
-                    thread::sleep(Duration::from_millis(10));
-                }
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let socket = loop {
+                    match UnixStream::connect(&socket_path) {
+                        Ok(s) => break s,
+                        Err(_) if std::time::Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(e) => panic!("connect {socket_path:?}: {e}"),
+                    }
+                };
                 for fd in &exit_fds {
                     assert_eq!(
                         fd.consume().unwrap_err().raw_os_error().unwrap(),
@@ -434,7 +441,6 @@ mod tests {
                         "exit event should not have been raised yet!"
                     );
                 }
-                let socket = UnixStream::connect(&socket_path).unwrap();
                 drop(socket);
             });
             daemon.serve(&socket_path).unwrap();
