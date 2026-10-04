@@ -4,6 +4,12 @@
 
 ### Added
 ### Changed
+- `VhostBackend::set_vring_call()`, `set_vring_kick()` and `set_vring_err()` (and their
+  `VhostBackendMut` counterparts) take `&dyn AsRawFd` instead of `&EventFd`, so that they can be
+  used on platforms without eventfd, e.g. with `vmm_sys_util::event` notifiers backed by pipes.
+  Callers passing an `&EventFd` are not affected, implementors of the traits need to update the
+  method signatures.
+
 ### Deprecated
 ### Fixed
 - [[#378]](https://github.com/rust-vmm/vhost/pull/378) Allow `REM_MEM_REG` requests to carry a file

@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use vm_memory::ByteValued;
-use vmm_sys_util::eventfd::EventFd;
 
 use super::connection::Endpoint;
 use super::message::*;
@@ -345,7 +344,7 @@ impl VhostBackend for Frontend {
     /// Bits (0-7) of the payload contain the vring index. Bit 8 is the invalid FD flag. This flag
     /// is set when there is no file descriptor in the ancillary data. This signals that polling
     /// will be used instead of waiting for the call.
-    fn set_vring_call(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    fn set_vring_call(&self, queue_index: usize, fd: &dyn AsRawFd) -> Result<()> {
         let mut node = self.node();
         if queue_index as u64 >= node.max_queue_num {
             return error_code(VhostUserError::InvalidParam);
@@ -359,7 +358,7 @@ impl VhostBackend for Frontend {
     /// Bits (0-7) of the payload contain the vring index. Bit 8 is the invalid FD flag. This flag
     /// is set when there is no file descriptor in the ancillary data. This signals that polling
     /// should be used instead of waiting for a kick.
-    fn set_vring_kick(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    fn set_vring_kick(&self, queue_index: usize, fd: &dyn AsRawFd) -> Result<()> {
         let mut node = self.node();
         if queue_index as u64 >= node.max_queue_num {
             return error_code(VhostUserError::InvalidParam);
@@ -372,7 +371,7 @@ impl VhostBackend for Frontend {
     /// Set the event file descriptor to signal when error occurs.
     /// Bits (0-7) of the payload contain the vring index. Bit 8 is the invalid FD flag. This flag
     /// is set when there is no file descriptor in the ancillary data.
-    fn set_vring_err(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    fn set_vring_err(&self, queue_index: usize, fd: &dyn AsRawFd) -> Result<()> {
         let mut node = self.node();
         if queue_index as u64 >= node.max_queue_num {
             return error_code(VhostUserError::InvalidParam);

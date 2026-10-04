@@ -285,6 +285,7 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use uuid::Uuid;
+    use vmm_sys_util::event::{new_event_consumer_and_notifier, EventFlag};
     use vmm_sys_util::rand::rand_alphanumerics;
     use vmm_sys_util::tempfile::TempFile;
 
@@ -502,14 +503,14 @@ mod tests {
         let num = frontend.get_queue_num().unwrap();
         assert_eq!(num, 2);
 
-        let eventfd = vmm_sys_util::eventfd::EventFd::new(0).unwrap();
+        let mem_file = tempfile::tempfile().unwrap();
         let (tx, _) = UnixStream::pair().unwrap();
         let mem = [VhostUserMemoryRegionInfo::new(
             0,
             0x10_0000,
             0,
             0,
-            eventfd.as_raw_fd(),
+            mem_file.as_raw_fd(),
         )];
         frontend.set_mem_table(&mem).unwrap();
 
@@ -533,11 +534,13 @@ mod tests {
                 Some(VhostUserDirtyLogRegion {
                     mmap_size: 0x1000,
                     mmap_offset: 0,
-                    mmap_handle: eventfd.as_raw_fd(),
+                    mmap_handle: mem_file.as_raw_fd(),
                 }),
             )
             .unwrap();
-        frontend.set_log_fd(eventfd.as_raw_fd()).unwrap();
+        let (event_consumer, event_notifier) =
+            new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+        frontend.set_log_fd(event_notifier.as_raw_fd()).unwrap();
 
         frontend.set_vring_num(0, 256).unwrap();
         frontend.set_vring_base(0, 0).unwrap();
@@ -551,9 +554,9 @@ mod tests {
             log_addr: Some(0x4000),
         };
         frontend.set_vring_addr(0, &config).unwrap();
-        frontend.set_vring_call(0, &eventfd).unwrap();
-        frontend.set_vring_kick(0, &eventfd).unwrap();
-        frontend.set_vring_err(0, &eventfd).unwrap();
+        frontend.set_vring_call(0, &event_notifier).unwrap();
+        frontend.set_vring_kick(0, &event_consumer).unwrap();
+        frontend.set_vring_err(0, &event_consumer).unwrap();
 
         let max_mem_slots = frontend.get_max_mem_slots().unwrap();
         assert_eq!(max_mem_slots, 509);

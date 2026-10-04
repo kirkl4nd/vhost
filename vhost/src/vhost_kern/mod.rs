@@ -17,7 +17,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use libc::{c_void, ssize_t, write};
 
 use vm_memory::{Address, GuestAddress, GuestAddressSpace, GuestMemoryBackend, GuestUsize};
-use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::ioctl::{ioctl, ioctl_with_mut_ref, ioctl_with_ptr, ioctl_with_ref};
 
 use super::{
@@ -254,8 +253,8 @@ impl<T: VhostKernBackend> VhostBackend for T {
     ///
     /// # Arguments
     /// * `queue_index` - Index of the queue to modify.
-    /// * `fd` - EventFd to trigger.
-    fn set_vring_call(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    /// * `fd` - Event file descriptor (e.g. an eventfd) to trigger.
+    fn set_vring_call(&self, queue_index: usize, fd: &dyn AsRawFd) -> Result<()> {
         let vring_file = vhost_vring_file {
             index: queue_index as u32,
             fd: fd.as_raw_fd(),
@@ -271,8 +270,8 @@ impl<T: VhostKernBackend> VhostBackend for T {
     ///
     /// # Arguments
     /// * `queue_index` - Index of the queue to modify.
-    /// * `fd` - EventFd that will be signaled from guest.
-    fn set_vring_kick(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    /// * `fd` - Event file descriptor (e.g. an eventfd) that will be signaled from guest.
+    fn set_vring_kick(&self, queue_index: usize, fd: &dyn AsRawFd) -> Result<()> {
         let vring_file = vhost_vring_file {
             index: queue_index as u32,
             fd: fd.as_raw_fd(),
@@ -287,8 +286,8 @@ impl<T: VhostKernBackend> VhostBackend for T {
     ///
     /// # Arguments
     /// * `queue_index` - Index of the queue to modify.
-    /// * `fd` - EventFd that will be signaled from the backend.
-    fn set_vring_err(&self, queue_index: usize, fd: &EventFd) -> Result<()> {
+    /// * `fd` - Event file descriptor (e.g. an eventfd) that will be signaled from the backend.
+    fn set_vring_err(&self, queue_index: usize, fd: &dyn AsRawFd) -> Result<()> {
         let vring_file = vhost_vring_file {
             index: queue_index as u32,
             fd: fd.as_raw_fd(),
