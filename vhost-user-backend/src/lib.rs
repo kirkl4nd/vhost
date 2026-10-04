@@ -411,42 +411,37 @@ mod tests {
             GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0x100000), 0x10000)]).unwrap(),
         );
         let backend = Arc::new(Mutex::new(MockVhostBackend::new()));
-        let mut daemon = VhostUserDaemon::new("test".to_owned(), backend.clone(), mem).unwrap();
+        // Clone exit fds before the daemon starts worker threads. Those workers take the
+        // backend lock in `handle_event`; locking it again from this thread while they run
+        // can deadlock.
+        let nthreads = backend.queues_per_thread().len();
+        let exit_fds: Vec<_> = (0..nthreads)
+            .map(|i| backend.exit_event(i).unwrap().0)
+            .collect();
+        let mut daemon = VhostUserDaemon::new("test".to_owned(), backend, mem).unwrap();
         let tmpdir = tempfile::tempdir().unwrap();
         let socket_path = tmpdir.path().join("socket");
 
         thread::scope(|s| {
             s.spawn(|| {
-                let _ = daemon.serve(&socket_path);
+                while !socket_path.exists() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                for fd in &exit_fds {
+                    assert_eq!(
+                        fd.consume().unwrap_err().raw_os_error().unwrap(),
+                        EAGAIN,
+                        "exit event should not have been raised yet!"
+                    );
+                }
+                let socket = UnixStream::connect(&socket_path).unwrap();
+                drop(socket);
             });
-
-            // We have no way to wait for when the server becomes available...
-            // So we will have to spin!
-            while !socket_path.exists() {
-                thread::sleep(Duration::from_millis(10));
-            }
-
-            // Check that no exit events got triggered yet
-            for thread_id in 0..backend.queues_per_thread().len() {
-                let fd = backend.exit_event(thread_id).unwrap();
-                // Reading from exit fd should fail since nothing was written yet
-                assert_eq!(
-                    fd.0.consume().unwrap_err().raw_os_error().unwrap(),
-                    EAGAIN,
-                    "exit event should not have been raised yet!"
-                );
-            }
-
-            let socket = UnixStream::connect(&socket_path).unwrap();
-            // disconnect immediately again
-            drop(socket);
+            daemon.serve(&socket_path).unwrap();
         });
 
-        // Check that exit events got triggered
-        let backend = backend.lock().unwrap();
-        for thread_id in 0..backend.queues_per_thread().len() {
-            let fd = backend.exit_event(thread_id).unwrap();
-            assert!(fd.0.consume().is_ok(), "No exit event was raised!");
+        for fd in &exit_fds {
+            assert!(fd.consume().is_ok(), "No exit event was raised!");
         }
     }
 

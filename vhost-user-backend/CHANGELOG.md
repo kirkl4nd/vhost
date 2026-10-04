@@ -18,6 +18,7 @@
   fd and starts monitoring the new one.
 - Edge-triggered `EWOULDBLOCK` on kick consume is not treated as a worker error.
 - Vring-enabled notifications use a dedicated poll token instead of overlapping the exit token.
+- Avoid locking the mock backend from `test_daemon_serve` while vring workers are running (deadlock).
 
 ## v0.23.0
 
