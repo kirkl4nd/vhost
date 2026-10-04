@@ -21,7 +21,6 @@ use vm_memory::{
 use vmm_sys_util::event::{
     new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
 };
-use vmm_sys_util::eventfd::EventFd;
 
 struct MockVhostBackend {
     events: u64,
@@ -170,8 +169,7 @@ fn vhost_user_client(path: &Path, barrier: Arc<Barrier>) {
     frontend.set_protocol_features(proto).unwrap();
     assert!(proto.contains(VhostUserProtocolFeatures::REPLY_ACK));
 
-    let memfd = nix::sys::memfd::memfd_create("test", nix::sys::memfd::MFdFlags::empty()).unwrap();
-    let file = File::from(memfd);
+    let file = tempfile::tempfile().unwrap();
     file.set_len(0x100000).unwrap();
     let file_offset = FileOffset::new(file, 0);
     let mem = GuestMemoryMmap::<()>::from_ranges_with_files(&[(
@@ -205,10 +203,12 @@ fn vhost_user_client(path: &Path, barrier: Arc<Barrier>) {
     };
     frontend.set_vring_addr(0, &config).unwrap();
 
-    let eventfd = EventFd::new(0).unwrap();
-    frontend.set_vring_kick(0, &eventfd).unwrap();
-    frontend.set_vring_call(0, &eventfd).unwrap();
-    frontend.set_vring_err(0, &eventfd).unwrap();
+    let (kick, _kick_notifier) = new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+    let (_call_consumer, call) = new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+    let (err, _err_notifier) = new_event_consumer_and_notifier(EventFlag::empty()).unwrap();
+    frontend.set_vring_kick(0, &kick).unwrap();
+    frontend.set_vring_call(0, &call).unwrap();
+    frontend.set_vring_err(0, &err).unwrap();
     frontend.set_vring_enable(0, true).unwrap();
 
     let buf = [0u8; 8];
@@ -293,7 +293,7 @@ fn test_vhost_user_enable() {
 
 fn vhost_user_set_inflight(path: &Path, barrier: Arc<Barrier>) {
     let mut frontend = setup_frontend(path, barrier);
-    let eventfd = EventFd::new(0).unwrap();
+    let file = tempfile::tempfile().unwrap();
     // No implementation for inflight_fd yet.
     let inflight = VhostUserInflight {
         mmap_size: 0x100000,
@@ -302,7 +302,7 @@ fn vhost_user_set_inflight(path: &Path, barrier: Arc<Barrier>) {
         queue_size: 256,
     };
     frontend
-        .set_inflight_fd(&inflight, eventfd.as_raw_fd())
+        .set_inflight_fd(&inflight, file.as_raw_fd())
         .unwrap_err();
 }
 
