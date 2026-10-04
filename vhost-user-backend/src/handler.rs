@@ -214,37 +214,56 @@ where
         self.update_vring_registration(vring, index)
     }
 
+    /// Returns the index of the worker thread handling the vring, and the vring's event index
+    /// within that worker.
+    fn vring_worker(&self, index: u8) -> Option<(usize, usize)> {
+        self.queues_per_thread
+            .iter()
+            .enumerate()
+            .find_map(|(thread_index, queues_mask)| {
+                let shifted_queues_mask = queues_mask >> index;
+                (shifted_queues_mask & 1u64 == 1u64).then(|| {
+                    let evt_idx = queues_mask.count_ones() - shifted_queues_mask.count_ones();
+                    (thread_index, evt_idx as usize)
+                })
+            })
+    }
+
     /// Adds or removes the vring's kick fd to the epoll/kqueue instance based on the vring status.
     /// Ensures that notifications are handled only while the vring is both started and enabled
     /// and that no notifications are lost.
     fn update_vring_registration(&self, vring: &T::Vring, index: u8) -> VhostUserResult<()> {
         let vring_state = vring.get_ref();
-        if let Some(fd) = vring_state.get_kick() {
-            for (thread_index, queues_mask) in self.queues_per_thread.iter().enumerate() {
-                let shifted_queues_mask = queues_mask >> index;
-                if shifted_queues_mask & 1u64 == 1u64 {
-                    let evt_idx = queues_mask.count_ones() - shifted_queues_mask.count_ones();
-                    if vring_state.get_queue().ready() && vring_state.is_enabled() {
-                        if let Err(e) = self.handlers[thread_index].register_event(
-                            fd.as_raw_fd(),
-                            EventSet::Readable,
-                            evt_idx as usize,
-                        ) {
-                            if e.kind() != io::ErrorKind::AlreadyExists {
-                                // This could happen if we're asked by the frontend to enable an
-                                // already enabled queue, don't fail in that case.
-                                return Err(VhostUserError::ReqHandlerError(e));
-                            }
-                        }
-                    } else {
-                        let _ = self.handlers[thread_index]
-                            .unregister_event(fd.as_raw_fd(), evt_idx as usize);
+        if let (Some(fd), Some((thread_index, evt_idx))) =
+            (vring_state.get_kick(), self.vring_worker(index))
+        {
+            if vring_state.get_queue().ready() && vring_state.is_enabled() {
+                if let Err(e) = self.handlers[thread_index].register_event(
+                    fd.as_raw_fd(),
+                    EventSet::Readable,
+                    evt_idx,
+                ) {
+                    if e.kind() != io::ErrorKind::AlreadyExists {
+                        // This could happen if we're asked by the frontend to enable an
+                        // already enabled queue, don't fail in that case.
+                        return Err(VhostUserError::ReqHandlerError(e));
                     }
-                    break;
                 }
+            } else {
+                let _ = self.handlers[thread_index].unregister_event(fd.as_raw_fd(), evt_idx);
             }
         }
         Ok(())
+    }
+
+    /// Removes the vring's kick fd from the epoll/kqueue instance, if it was registered.
+    fn unregister_vring_kick(&self, vring: &T::Vring, index: u8) {
+        let vring_state = vring.get_ref();
+        if let (Some(fd), Some((thread_index, evt_idx))) =
+            (vring_state.get_kick(), self.vring_worker(index))
+        {
+            let _ = self.handlers[thread_index].unregister_event(fd.as_raw_fd(), evt_idx);
+        }
     }
 
     /// Helper to check if VirtioFeature enabled
@@ -480,6 +499,10 @@ where
             .get(index as usize)
             .ok_or(VhostUserError::InvalidParam)?;
 
+        // The current kick fd is about to be closed. Stop monitoring it first, so that its fd
+        // number is not left registered with the poller once it gets reused.
+        self.unregister_vring_kick(vring, index);
+
         // SAFETY: EventFd requires that it has sole ownership of its fd. So
         // does File, so this is safe.
         // Ideally, we'd have a generic way to refer to a uniquely-owned fd,
@@ -488,6 +511,8 @@ where
 
         if self.vring_needs_init(vring) {
             self.initialize_vring(vring, index)?;
+        } else {
+            self.update_vring_registration(vring, index)?;
         }
 
         Ok(())
@@ -900,5 +925,43 @@ mod tests {
             events >= 1,
             "Backend SHOULD have been kicked after enabling"
         );
+    }
+
+    #[test]
+    fn test_replace_kick_fd() {
+        let mem = GuestMemoryAtomic::new(
+            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0x100000), 0x10000)]).unwrap(),
+        );
+        let backend = Arc::new(Mutex::new(MockVhostBackend::new()));
+        let mut handler = VhostUserHandler::new(backend.clone(), mem).unwrap();
+        handler
+            .set_features(VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits())
+            .unwrap();
+        handler.set_vring_enable(0, true).unwrap();
+
+        let wait_for_events = |expected: u64| {
+            for _ in 0..100 {
+                if backend.lock().unwrap().events() >= expected {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("backend was not kicked");
+        };
+
+        let mut notifiers = Vec::new();
+        for _ in 0..3 {
+            let (consumer, notifier) =
+                new_event_consumer_and_notifier(EventFlag::NONBLOCK).unwrap();
+            // SAFETY: we know consumer is valid.
+            let file = unsafe { File::from_raw_fd(consumer.into_raw_fd()) };
+            // Replacing the kick fd of a running vring closes the previous one, whose fd number
+            // can then be reused by the next kick fd.
+            handler.set_vring_kick(0, Some(file)).unwrap();
+            let events = backend.lock().unwrap().events();
+            notifier.notify().unwrap();
+            wait_for_events(events + 1);
+            notifiers.push(notifier);
+        }
     }
 }

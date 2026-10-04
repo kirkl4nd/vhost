@@ -11,6 +11,8 @@
 
 ### Deprecated
 ### Fixed
+- Replacing the kick fd of a started vring with `SET_VRING_KICK` now stops monitoring the previous
+  fd and starts monitoring the new one.
 
 ## v0.23.0
 
