@@ -1081,9 +1081,37 @@ fn get_socket_opt(fd: BorrowedFd<'_>, opt: libc::c_int) -> std::io::Result<libc:
     }
 }
 
+// Get the address family of a socket. Unlike `SO_DOMAIN`, which is Linux specific, `getsockname()`
+// is available on all Unix platforms.
+fn get_socket_family(fd: BorrowedFd<'_>) -> std::io::Result<libc::c_int> {
+    // SAFETY: `sockaddr_storage` is a plain C struct for which all-zero bytes is a valid value.
+    let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+
+    // SAFETY:
+    // - `addr` and `len` point to valid writable memory.
+    // - `len` is initialized to the size of `addr`, so `getsockname()` will not write past the end
+    //   of `addr`.
+    // - `fd.as_raw_fd()` is valid because `BorrowedFd` guarantees a live file descriptor for the
+    //   duration of the call.
+    let rc = unsafe {
+        libc::getsockname(
+            fd.as_raw_fd(),
+            std::ptr::addr_of_mut!(addr).cast::<libc::sockaddr>(),
+            std::ptr::addr_of_mut!(len),
+        )
+    };
+
+    if rc == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(libc::c_int::from(addr.ss_family))
+    }
+}
+
 // Validate that the given file descriptor is an AF_UNIX SOCK_STREAM socket.
 fn validate_unix_stream_socket_fd(fd: BorrowedFd<'_>) -> Result<()> {
-    let domain = get_socket_opt(fd, libc::SO_DOMAIN).map_err(Error::InvalidSocketFd)?;
+    let domain = get_socket_family(fd).map_err(Error::InvalidSocketFd)?;
     if domain != libc::AF_UNIX {
         return Err(Error::NotUnixSocket);
     }

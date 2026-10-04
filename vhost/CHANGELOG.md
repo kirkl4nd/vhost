@@ -12,6 +12,8 @@
 
 ### Deprecated
 ### Fixed
+- Validate the address family of backend request sockets with `getsockname()` instead of the Linux
+  specific `SO_DOMAIN` socket option, so that the crate builds on other Unix platforms.
 - [[#378]](https://github.com/rust-vmm/vhost/pull/378) Allow `REM_MEM_REG` requests to carry a file
   descriptor for spec compliance against older incorrect implementations.
 
