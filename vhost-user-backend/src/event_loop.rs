@@ -115,6 +115,11 @@ fn event_to_event_set(evt: &Event) -> Result<EventSet> {
     }
 }
 
+// Token of the internal event used to notify the worker that a vring has been started. It must not
+// be shared with the exit event: the poller is edge-triggered, so a notification that has already
+// been consumed may still be reported, and it must not be mistaken for an exit request.
+const VRING_ENABLED_TOKEN: usize = usize::MAX;
+
 /// Epoll/kqueue event handler to manage and process epoll/kqueue events for registered file descriptor.
 ///
 /// The `VringPollHandler` structure provides interfaces to:
@@ -187,7 +192,7 @@ where
         registry
             .register(
                 &mut SourceFd(&vring_enabled_event_fd.0.as_raw_fd()),
-                Token(num_backend_queues),
+                Token(VRING_ENABLED_TOKEN),
                 Interest::READABLE,
             )
             .map_err(VringPollError::RegisterVringEnabledEvent)?;
@@ -214,9 +219,13 @@ where
     ///
     /// When this event is later triggered, the backend implementation of `handle_event` will be
     /// called.
+    ///
+    /// Events are edge-triggered: the backend is notified when `fd` becomes ready, and it must
+    /// consume everything that is pending on `fd` before it is notified again. Spurious
+    /// notifications, where `fd` is no longer ready, are possible.
     pub fn register_listener(&self, fd: RawFd, ev_type: EventSet, queue_idx: usize) -> Result<()> {
         // `data` range [0...num_queues] is reserved for queues and exit event.
-        if queue_idx <= self.num_backend_queues {
+        if queue_idx <= self.num_backend_queues || queue_idx == VRING_ENABLED_TOKEN {
             Err(io::Error::from_raw_os_error(libc::EINVAL))
         } else {
             self.register_event(fd, ev_type, queue_idx)
@@ -229,7 +238,7 @@ where
     /// dropped.
     pub fn unregister_listener(&self, fd: RawFd, queue_idx: usize) -> Result<()> {
         // `data` range [0...num_queues] is reserved for queues and exit event.
-        if queue_idx <= self.num_backend_queues {
+        if queue_idx <= self.num_backend_queues || queue_idx == VRING_ENABLED_TOKEN {
             Err(io::Error::from_raw_os_error(libc::EINVAL))
         } else {
             self.unregister_event(fd, queue_idx)
@@ -316,15 +325,22 @@ where
     }
 
     fn handle_event(&self, device_event: usize, evset: EventSet) -> VringPollResult<bool> {
+        if device_event == VRING_ENABLED_TOKEN {
+            return self.handle_vring_enabled_event(evset);
+        }
+
         if device_event == self.num_backend_queues {
-            return self.handle_num_queues_event(evset);
+            return Ok(self.exit_event_fd.is_some());
         }
 
         if device_event < self.vrings.len() {
             let vring = &self.vrings[device_event];
-            let enabled = vring
-                .read_kick()
-                .map_err(VringPollError::HandleEventReadKick)?;
+            let enabled = match vring.read_kick() {
+                Ok(enabled) => enabled,
+                // The kick was already consumed while handling a previous event.
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
+                Err(e) => return Err(VringPollError::HandleEventReadKick(e)),
+            };
 
             // If the vring is not enabled, it should not be processed.
             if !enabled {
@@ -339,32 +355,24 @@ where
         Ok(false)
     }
 
-    fn handle_num_queues_event(&self, evset: EventSet) -> VringPollResult<bool> {
-        // The num_queues event can be triggered by the exit event fd or a vring becoming enabled.
-        // The vring_enabled_event_fd is guaranteed to be non-blocking so reading from it will
-        // determine which fd triggered the event.
+    fn handle_vring_enabled_event(&self, evset: EventSet) -> VringPollResult<bool> {
         match self.vring_enabled_event_fd.0.consume() {
-            Ok(()) => {
-                let vrings_with_pending_events =
-                    std::mem::take(&mut *self.vrings_with_pending_events.lock().unwrap());
-                for device_event in vrings_with_pending_events {
-                    if device_event >= self.vrings.len() {
-                        return Err(VringPollError::VringIndexOutOfRange(device_event));
-                    }
-                    self.backend
-                        .handle_event(device_event, evset, &self.vrings, self.thread_id)
-                        .map_err(VringPollError::HandleEventBackendHandling)?;
-                }
-                // There may have been a notification in the exit fd too, but it wasn't consumed and
-                // it's not safe to attempt to because that fd may not be non-blocking. Returning
-                // false ensures there will be another iteration of the main loop which will trigger
-                // the same event if exit fd is readable.
-                Ok(false)
-            }
-            // With no notification in the vring enabled fd the only other option is the exit fd.
-            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(self.exit_event_fd.is_some()),
-            Err(e) => Err(VringPollError::HandleVringEnabledEventConsume(e)),
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
+            Err(e) => return Err(VringPollError::HandleVringEnabledEventConsume(e)),
         }
+
+        let vrings_with_pending_events =
+            std::mem::take(&mut *self.vrings_with_pending_events.lock().unwrap());
+        for device_event in vrings_with_pending_events {
+            if device_event >= self.vrings.len() {
+                return Err(VringPollError::VringIndexOutOfRange(device_event));
+            }
+            self.backend
+                .handle_event(device_event, evset, &self.vrings, self.thread_id)
+                .map_err(VringPollError::HandleEventBackendHandling)?;
+        }
+        Ok(false)
     }
 }
 
@@ -379,6 +387,8 @@ mod tests {
     use super::super::backend::tests::MockVhostBackend;
     use super::super::vring::VringRwLock;
     use super::*;
+    use std::fs::File;
+    use std::os::fd::FromRawFd;
     use std::sync::{mpsc, Arc, Mutex};
     use std::time::Duration;
     use vm_memory::{GuestAddress, GuestMemoryAtomic, GuestMemoryMmap};
@@ -452,5 +462,41 @@ mod tests {
         // Validate registry fd
         assert_ne!(handler.as_raw_fd(), -1);
         assert_ne!(handler.as_raw_fd(), poller.as_raw_fd());
+        // The internal vring enabled token is reserved.
+        handler
+            .register_listener(consumer.as_raw_fd(), EventSet::Readable, usize::MAX)
+            .unwrap_err();
+    }
+
+    #[test]
+    fn test_spurious_events() {
+        let mem = GuestMemoryAtomic::new(
+            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0x100000), 0x10000)]).unwrap(),
+        );
+        let vring = VringRwLock::new(mem, 0x1000).unwrap();
+        let backend = Arc::new(Mutex::new(MockVhostBackend::new()));
+        let poller = Poll::new().unwrap();
+        let handler =
+            VringPollHandler::new(backend.clone(), vec![vring.clone()], 0, &poller).unwrap();
+        assert!(handler.exit_event_fd.is_some());
+
+        let (kick, kick_notifier) = new_event_consumer_and_notifier(EventFlag::NONBLOCK).unwrap();
+        // SAFETY: the fd is owned by `kick` and ownership is transferred to the File.
+        vring.set_kick(Some(unsafe { File::from_raw_fd(kick.into_raw_fd()) }));
+        vring.set_enabled(true);
+
+        // A kick is handled once even if the poller reports it twice.
+        kick_notifier.notify().unwrap();
+        assert!(!handler.handle_event(0, EventSet::Readable).unwrap());
+        assert!(!handler.handle_event(0, EventSet::Readable).unwrap());
+        assert_eq!(backend.lock().unwrap().events(), 1);
+
+        // A stale vring enabled notification is not an exit request.
+        assert!(!handler
+            .handle_event(VRING_ENABLED_TOKEN, EventSet::Readable)
+            .unwrap());
+        assert_eq!(backend.lock().unwrap().events(), 1);
+
+        assert!(handler.handle_event(2, EventSet::Readable).unwrap());
     }
 }
