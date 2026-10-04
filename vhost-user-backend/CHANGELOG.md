@@ -8,11 +8,16 @@
 
 ### Changed
 - [[316](https://github.com/rust-vmm/vhost/pull/316)] Use mio to replace Epoll. Expose event_loop::EventSet.
+- `VhostUserBackend::handle_event` takes `device_event: usize` (was `u16`) so the token space
+  matches mio.
+- `VhostUserDaemon::get_epoll_handlers` is `get_poll_handlers`.
 
 ### Deprecated
 ### Fixed
 - Replacing the kick fd of a started vring with `SET_VRING_KICK` now stops monitoring the previous
   fd and starts monitoring the new one.
+- Edge-triggered `EWOULDBLOCK` on kick consume is not treated as a worker error.
+- Vring-enabled notifications use a dedicated poll token instead of overlapping the exit token.
 
 ## v0.23.0
 

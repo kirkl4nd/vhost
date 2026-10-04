@@ -9,6 +9,7 @@
   used on platforms without eventfd, e.g. with `vmm_sys_util::event` notifiers backed by pipes.
   Callers passing an `&EventFd` are not affected, implementors of the traits need to update the
   method signatures.
+- Raised the `bitflags` dependency to `2.13` so it matches current `vmm-sys-util`.
 
 ### Deprecated
 ### Fixed
